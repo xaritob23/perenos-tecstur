@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Перенос текстур (Rotated Resize Fix)</title>
+    <style>
+        body { font-family: sans-serif; background: #222; color: #eee; margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        #sidebar { width: 340px; background: #333; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; border-right: 1px solid #444; z-index: 10; }
+        #workspace { flex-grow: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; background: #111; position: relative; }
+        
+        .canvas-container { position: relative; border: 1px solid #555; box-shadow: 0 0 10px rgba(0,0,0,0.5); overflow: hidden; background: #000; }
+        canvas { display: block; cursor: crosshair; }
+        
+        button { padding: 8px; cursor: pointer; background: #444; color: white; border: 1px solid #666; border-radius: 4px; transition: 0.2s; }
+        button:hover { background: #555; }
+        button.primary { background: #007bff; border-color: #0056b3; }
+        button.success { background: #28a745; border-color: #1e7e34; }
+        button.warning { background: #ffc107; color: #000; border-color: #d39e00; }
+        button.small-btn { padding: 2px 6px; font-size: 11px; margin-left: 5px; }
+        
+        .control-group { margin-bottom: 15px; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        .control-group label { display: block; margin-bottom: 5px; font-size: 12px; color: #aaa; }
+        
+        #rect-list { max-height: 200px; overflow-y: auto; background: #222; border: 1px solid #444; }
+        .rect-item { padding: 6px; border-bottom: 1px solid #333; cursor: pointer; font-size: 12px; display: flex; justify-content: space-between; align-items: center; }
+        .rect-item:hover { background: #444; }
+        .rect-item.active { background: #007bff; }
+        .rect-item .actions { display: flex; gap: 3px; }
+        
+        input[type="number"] { width: 60px; background: #222; color: white; border: 1px solid #555; padding: 2px; }
+        input[type="file"] { color: #ccc; font-size: 12px; }
+        
+        .workspace-header { position: absolute; top: 10px; left: 20px; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 4px; font-size: 14px; pointer-events: none; }
+        .workspace-controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; background: rgba(0,0,0,0.8); padding: 10px; border-radius: 8px; z-index: 100; }
+        
+        .hint { font-size: 11px; color: #888; margin-top: 3px; line-height: 1.3; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h3>Управление</h3>
+    
+    <div class="control-group">
+        <label>1. Текстура А (Источник)</label>
+        <input type="file" id="uploadA" accept="image/*">
+        
+        <label style="margin-top:10px;">2. Текстура Б (Цель)</label>
+        <input type="file" id="uploadB" accept="image/*">
+    </div>
+
+    <div class="control-group">
+        <button id="addRect" class="primary" style="width:100%">+ Добавить область (макс 10)</button>
+        <div class="hint">Нажми и потяни на текстуре А. На Б тяни за углы, чтобы изменить размер.</div>
+    </div>
+
+    <div class="control-group">
+        <label>Список областей:</label>
+        <div id="rect-list"></div>
+    </div>
+
+    <div class="control-group" id="transform-controls" style="display:none;">
+        <label>Трансформация на Текстуре Б</label>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 5px;">
+            <div>X: <input type="number" id="posX" step="1"></div>
+            <div>Y: <input type="number" id="posY" step="1"></div>
+            <div>Ширина: <input type="number" id="widthB" step="1"></div>
+            <div>Высота: <input type="number" id="heightB" step="1"></div>
+            <div>Поворот: <input type="number" id="rot" step="1"></div>
+            <div>Масштаб: <input type="number" id="scale" step="0.1" value="1"></div>
+        </div>
+    </div>
+
+    <div class="control-group">
+        <label>JSON операции</label>
+        <button id="saveJson" style="width:100%">Скачать JSON</button>
+        <input type="file" id="loadJson" accept=".json" style="margin-top:5px; width:100%">
+    </div>
+
+    <div class="control-group">
+        <button id="exportLayer" class="success" style="width:100%">Сохранить слой (PNG)</button>
+    </div>
+</div>
+
+<div id="workspace">
+    <div class="workspace-header">Текстура А (Источник)</div>
+    <div class="canvas-container" id="containerA">
+        <canvas id="canvasA"></canvas>
+    </div>
+    
+    <div class="workspace-header" style="top: auto; bottom: 80px;">Текстура Б (Результат)</div>
+    <div class="canvas-container" id="containerB">
+        <canvas id="canvasB"></canvas>
+    </div>
+
+    <div class="workspace-controls">
+        <button onclick="resetView()" class="warning">Сбросить вид</button>
+        <span style="color:#aaa; font-size:12px; align-self:center;">Колесо - зум. Пробел/СКМ - панорама.</span>
+    </div>
+</div>
+
+<script>
+    const state = {
+        imgA: null,
+        imgB: null,
+        rects: [], 
+        selectedRectId: null,
+        
+        isDrawing: false,
+        isDraggingA: false,
+        isResizingA: false,
+        isDraggingB: false,
+        isResizingB: false,
+        
+        dragStart: {x: 0, y: 0},
+        activeCorner: null, 
+        
+        viewA: { scale: 1, offsetX: 0, offsetY: 0 },
+        viewB: { scale: 1, offsetX: 0, offsetY: 0 },
+        isPanning: false,
+        panStart: {x: 0, y: 0},
+        spacePressed: false
+    };
+
+    const MAX_RECTS = 10;
+
+    const canvasA = document.getElementById('canvasA');
+    const ctxA = canvasA.getContext('2d');
+    const canvasB = document.getElementById('canvasB');
+    const ctxB = canvasB.getContext('2d');
+    const containerA = document.getElementById('containerA');
+    const containerB = document.getElementById('containerB');
+    
+    const rectList = document.getElementById('rect-list');
+    const transformControls = document.getElementById('transform-controls');
+    
+    const posXInput = document.getElementById('posX');
+    const posYInput = document.getElementById('posY');
+    const widthBInput = document.getElementById('widthB');
+    const heightBInput = document.getElementById('heightB');
+    const rotInput = document.getElementById('rot');
+    const scaleInput = document.getElementById('scale');
+
+    function init() {
+        resizeCanvases();
+        window.addEventListener('resize', resizeCanvases);
+
+        document.getElementById('uploadA').addEventListener('change', e => loadImage(e, 'A'));
+        document.getElementById('uploadB').addEventListener('change', e => loadImage(e, 'B'));
+        
+        document.getElementById('addRect').addEventListener('click', () => {
+            state.isDrawing = true;
+            canvasA.style.cursor = 'crosshair';
+        });
+
+        document.getElementById('saveJson').addEventListener('click', saveToJson);
+        document.getElementById('loadJson').addEventListener('change', loadFromJson);
+        document.getElementById('exportLayer').addEventListener('click', exportLayer);
+        
+        [posXInput, posYInput, widthBInput, heightBInput, rotInput, scaleInput].forEach(inp => {
+            inp.addEventListener('input', updateRectFromInputs);
+        });
+
+        window.addEventListener('keydown', e => { if(e.code === 'Space') state.spacePressed = true; });
+        window.addEventListener('keyup', e => { if(e.code === 'Space') state.spacePressed = false; });
+
+        setupCanvasEvents(canvasA, 'A');
+        setupCanvasEvents(canvasB, 'B');
+
+        render();
+    }
+
+    function resizeCanvases() {
+        const w = window.innerWidth - 360;
+        const h = (window.innerHeight - 100) / 2;
+        
+        canvasA.width = w; canvasA.height = h;
+        canvasB.width = w; canvasB.height = h;
+        containerA.style.width = w + 'px'; containerA.style.height = h + 'px';
+        containerB.style.width = w + 'px'; containerB.style.height = h + 'px';
+        
+        render();
+    }
+
+    function loadImage(e, type) {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+                if (type === 'A') {
+                    state.imgA = img;
+                    fitImageToView(img, state.viewA, canvasA);
+                } else {
+                    state.imgB = img;
+                    fitImageToView(img, state.viewB, canvasB);
+                }
+                render();
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+    }
+
+    function fitImageToView(img, view, canvas) {
+        const scaleX = canvas.width / img.width;
+        const scaleY = canvas.height / img.height;
+        const scale = Math.min(scaleX, scaleY) * 0.9;
+        view.scale = scale;
+        view.offsetX = (canvas.width - img.width * scale) / 2;
+        view.offsetY = (canvas.height - img.height * scale) / 2;
+    }
+
+    function resetView() {
+        if (state.imgA) fitImageToView(state.imgA, state.viewA, canvasA);
+        if (state.imgB) fitImageToView(state.imgB, state.viewB, canvasB);
+        render();
+    }
+
+    function selectRect(id) {
+        state.selectedRectId = id;
+        renderList();
+        updateInputsFromRect();
+        render();
+    }
+
+    function deleteRect(id) {
+        state.rects = state.rects.filter(r => r.id !== id);
+        if (state.selectedRectId === id) state.selectedRectId = null;
+        renderList();
+        render();
+    }
+
+    function duplicateRect(id) {
+        if (state.rects.length >= MAX_RECTS) {
+            alert(`Максимум ${MAX_RECTS} областей!`);
+            return;
+        }
+        const original = state.rects.find(r => r.id === id);
+        if (!original) return;
+
+        const clone = JSON.parse(JSON.stringify(original));
+        clone.id = Date.now();
+        clone.x += 20; clone.y += 20;
+        clone.targetX += 20; clone.targetY += 20;
+
+        state.rects.push(clone);
+        selectRect(clone.id);
+        renderList();
+        render();
+    }
+
+    function updateInputsFromRect() {
+        const rect = state.rects.find(r => r.id === state.selectedRectId);
+        if (!rect) {
+            transformControls.style.display = 'none';
+            return;
+        }
+        transformControls.style.display = 'block';
+        posXInput.value = Math.round(rect.targetX);
+        posYInput.value = Math.round(rect.targetY);
+        widthBInput.value = Math.round(rect.targetW);
+        heightBInput.value = Math.round(rect.targetH);
+        rotInput.value = Math.round(rect.rot);
+        scaleInput.value = rect.scale;
+    }
+
+    function updateRectFromInputs() {
+        const rect = state.rects.find(r => r.id === state.selectedRectId);
+        if (!rect) return;
+        rect.targetX = parseFloat(posXInput.value) || 0;
+        rect.targetY = parseFloat(posYInput.value) || 0;
+        rect.targetW = Math.max(5, parseFloat(widthBInput.value) || 5);
+        rect.targetH = Math.max(5, parseFloat(heightBInput.value) || 5);
+        rect.rot = parseFloat(rotInput.value) || 0;
+        rect.scale = parseFloat(scaleInput.value) || 1;
+        render();
+    }
+
+    // Вспомогательная функция: получение центра снимка
+    function getRectCenter(r) {
+        const drawW = r.targetW * r.scale;
+        const drawH = r.targetH * r.scale;
+        return { x: r.targetX + drawW/2, y: r.targetY + drawH/2, w: drawW, h: drawH };
+    }
+
+    // Вспомогательная: перевод мировых координат в локальные (относительно центра с поворотом)
+    function worldToLocal(worldX, worldY, rect) {
+        const c = getRectCenter(rect);
+        const rad = -rect.rot * Math.PI / 180;
+        const dx = worldX - c.x;
+        const dy = worldY - c.y;
+        return {
+            x: dx * Math.cos(rad) - dy * Math.sin(rad),
+            y: dx * Math.sin(rad) + dy * Math.cos(rad)
+        };
+    }
+
+    // Вспомогательная: перевод локальных координат в мировые
+    function localToWorld(localX, localY, rect) {
+        const c = getRectCenter(rect);
+        const rad = rect.rot * Math.PI / 180;
+        return {
+            x: c.x + (localX * Math.cos(rad) - localY * Math.sin(rad)),
+            y: c.y + (localX * Math.sin(rad) + localY * Math.cos(rad))
+        };
+    }
+
+    function render() {
+        // --- А ---
+        ctxA.clearRect(0, 0, canvasA.width, canvasA.height);
+        ctxA.save();
+        ctxA.translate(state.viewA.offsetX, state.viewA.offsetY);
+        ctxA.scale(state.viewA.scale, state.viewA.scale);
+
+        if (state.imgA) ctxA.drawImage(state.imgA, 0, 0);
+        else { ctxA.fillStyle = '#333'; ctxA.fillRect(0,0,canvasA.width, canvasA.height); }
+
+        state.rects.forEach(r => {
+            ctxA.strokeStyle = r.id === state.selectedRectId ? '#00ff00' : '#ff0000';
+            ctxA.lineWidth = 2 / state.viewA.scale;
+            ctxA.strokeRect(r.x, r.y, r.w, r.h);
+            ctxA.fillStyle = r.id === state.selectedRectId ? 'rgba(0, 255, 0, 0.2)' : 'rgba(255, 0, 0, 0.1)';
+            ctxA.fillRect(r.x, r.y, r.w, r.h);
+            
+            if (r.id === state.selectedRectId) {
+                const hs = 8 / state.viewA.scale;
+                ctxA.fillStyle = '#00ff00';
+                ctxA.fillRect(r.x - hs/2, r.y - hs/2, hs, hs);
+                ctxA.fillRect(r.x + r.w - hs/2, r.y + r.h - hs/2, hs, hs);
+            }
+        });
+        ctxA.restore();
+
+        // --- Б ---
+        ctxB.clearRect(0, 0, canvasB.width, canvasB.height);
+        ctxB.save();
+        ctxB.translate(state.viewB.offsetX, state.viewB.offsetY);
+        ctxB.scale(state.viewB.scale, state.viewB.scale);
+
+        if (state.imgB) ctxB.drawImage(state.imgB, 0, 0);
+        else { ctxB.fillStyle = '#333'; ctxB.fillRect(0,0,canvasB.width, canvasB.height); }
+
+        if (state.imgA) {
+            state.rects.forEach(r => {
+                ctxB.save();
+                const drawW = r.targetW * r.scale;
+                const drawH = r.targetH * r.scale;
+                
+                ctxB.translate(r.targetX + drawW/2, r.targetY + drawH/2);
+                ctxB.rotate(r.rot * Math.PI / 180);
+                
+                ctxB.drawImage(
+                    state.imgA, 
+                    r.x, r.y, r.w, r.h, 
+                    -drawW/2, -drawH/2, drawW, drawH
+                );
+
+                ctxB.strokeStyle = r.id === state.selectedRectId ? '#00ff00' : 'rgba(255, 0, 0, 0.5)';
+                ctxB.lineWidth = 2 / state.viewB.scale;
+                ctxB.strokeRect(-drawW/2, -drawH/2, drawW, drawH);
+                
+                if (r.id === state.selectedRectId) {
+                    const hs = 8 / state.viewB.scale;
+                    ctxB.fillStyle = '#00ff00';
+                    ctxB.fillRect(-drawW/2 - hs/2, -drawH/2 - hs/2, hs, hs);
+                    ctxB.fillRect(drawW/2 - hs/2, drawH/2 - hs/2, hs, hs);
+                }
+                ctxB.restore();
+            });
+        }
+        ctxB.restore();
+    }
+
+    function renderList() {
+        rectList.innerHTML = '';
+        state.rects.forEach((r, index) => {
+            const div = document.createElement('div');
+            div.className = `rect-item ${r.id === state.selectedRectId ? 'active' : ''}`;
+            
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = `Область ${index + 1}`;
+            nameSpan.onclick = () => selectRect(r.id);
+            
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            
+            const dupBtn = document.createElement('button');
+            dupBtn.className = 'small-btn primary';
+            dupBtn.textContent = 'Дубль';
+            dupBtn.onclick = (e) => { e.stopPropagation(); duplicateRect(r.id); };
+            
+            const delBtn = document.createElement('button');
+            delBtn.className = 'small-btn';
+            delBtn.style.background = '#dc3545';
+            delBtn.textContent = 'X';
+            delBtn.onclick = (e) => { e.stopPropagation(); deleteRect(r.id); };
+            
+            actions.appendChild(dupBtn);
+            actions.appendChild(delBtn);
+            
+            div.appendChild(nameSpan);
+            div.appendChild(actions);
+            rectList.appendChild(div);
+        });
+    }
+
+    function setupCanvasEvents(canvas, type) {
+        const view = type === 'A' ? state.viewA : state.viewB;
+
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomIntensity = 0.1;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            const imgX = (mouseX - view.offsetX) / view.scale;
+            const imgY = (mouseY - view.offsetY) / view.scale;
+            const delta = e.deltaY > 0 ? -zoomIntensity : zoomIntensity;
+            const newScale = Math.max(0.1, Math.min(10, view.scale * (1 + delta)));
+            view.offsetX = mouseX - imgX * newScale;
+            view.offsetY = mouseY - imgY * newScale;
+            view.scale = newScale;
+            render();
+        }, { passive: false });
+
+        let startImgX, startImgY;
+        let tempRect = null;
+
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            if (e.button === 1 || state.spacePressed) {
+                state.isPanning = true;
+                state.panStart = { x: mouseX - view.offsetX, y: mouseY - view.offsetY };
+                canvas.style.cursor = 'grabbing';
+                return;
+            }
+
+            const imgX = (mouseX - view.offsetX) / view.scale;
+            const imgY = (mouseY - view.offsetY) / view.scale;
+            startImgX = imgX;
+            startImgY = imgY;
+
+            if (type === 'A') {
+                if (state.isDrawing) {
+                    if (state.rects.length >= MAX_RECTS) { alert('Максимум!'); state.isDrawing = false; return; }
+                    tempRect = {
+                        id: Date.now(),
+                        x: imgX, y: imgY, w: 1, h: 1,
+                        targetX: imgX, targetY: imgY, targetW: 1, targetH: 1,
+                        rot: 0, scale: 1
+                    };
+                    state.rects.push(tempRect);
+                    state.selectedRectId = tempRect.id;
+                    renderList();
+                    render();
+                } else {
+                    const selected = state.rects.find(r => r.id === state.selectedRectId);
+                    let clickedHandle = null;
+                    
+                    if (selected) {
+                        const hs = 10 / view.scale;
+                        if (Math.abs(imgX - selected.x) < hs && Math.abs(imgY - selected.y) < hs) clickedHandle = 'tl';
+                        if (Math.abs(imgX - (selected.x + selected.w)) < hs && Math.abs(imgY - (selected.y + selected.h)) < hs) clickedHandle = 'br';
+                    }
+
+                    if (clickedHandle) {
+                        state.isResizingA = true;
+                        state.activeCorner = clickedHandle;
+                    } else {
+                        let clicked = null;
+                        for (let i = state.rects.length - 1; i >= 0; i--) {
+                            const r = state.rects[i];
+                            if (imgX >= r.x && imgX <= r.x + r.w && imgY >= r.y && imgY <= r.y + r.h) { clicked = r; break; }
+                        }
+                        if (clicked) {
+                            selectRect(clicked.id);
+                            state.isDraggingA = true;
+                            state.dragStart = { x: imgX - clicked.x, y: imgY - clicked.y };
+                        }
+                    }
+                }
+            } else {
+                // Логика на Б с учетом поворота
+                const activeRect = state.rects.find(r => r.id === state.selectedRectId);
+                if (!activeRect) return;
+                
+                // Переводим координаты мыши в локальные (относительно центра с поворотом)
+                const local = worldToLocal(imgX, imgY, activeRect);
+                const c = getRectCenter(activeRect);
+                const w2 = c.w / 2;
+                const h2 = c.h / 2;
+                const hs = 12 / view.scale;
+                
+                // Проверяем углы в ЛОКАЛЬНОЙ системе
+                if (Math.abs(local.x + w2) < hs && Math.abs(local.y + h2) < hs) {
+                    state.isResizingB = true;
+                    state.activeCorner = 'target_tl';
+                } else if (Math.abs(local.x - w2) < hs && Math.abs(local.y - h2) < hs) {
+                    state.isResizingB = true;
+                    state.activeCorner = 'target_br';
+                } else if (Math.abs(local.x) < w2 && Math.abs(local.y) < h2) {
+                    state.isDraggingB = true;
+                    state.dragStart = { x: imgX - c.x, y: imgY - c.y };
+                }
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            if (state.isPanning) {
+                view.offsetX = mouseX - state.panStart.x;
+                view.offsetY = mouseY - state.panStart.y;
+                render();
+                return;
+            }
+
+            const imgX = (mouseX - view.offsetX) / view.scale;
+            const imgY = (mouseY - view.offsetY) / view.scale;
+
+            if (type === 'A') {
+                if (state.isDrawing && tempRect) {
+                    tempRect.x = Math.min(startImgX, imgX);
+                    tempRect.y = Math.min(startImgY, imgY);
+                    tempRect.w = Math.abs(imgX - startImgX);
+                    tempRect.h = Math.abs(imgY - startImgY);
+                    render();
+                    return;
+                }
+
+                const activeRect = state.rects.find(r => r.id === state.selectedRectId);
+                if (!activeRect) return;
+
+                if (state.isDraggingA) {
+                    activeRect.x = imgX - state.dragStart.x;
+                    activeRect.y = imgY - state.dragStart.y;
+                    render();
+                } else if (state.isResizingA) {
+                    if (state.activeCorner === 'tl') {
+                        const newX = imgX;
+                        const newY = imgY;
+                        const newW = activeRect.x + activeRect.w - newX;
+                        const newH = activeRect.y + activeRect.h - newY;
+                        if (newW > 5 && newH > 5) {
+                            activeRect.x = newX;
+                            activeRect.y = newY;
+                            activeRect.w = newW;
+                            activeRect.h = newH;
+                        }
+                    } else if (state.activeCorner === 'br') {
+                        activeRect.w = Math.max(5, imgX - activeRect.x);
+                        activeRect.h = Math.max(5, imgY - activeRect.y);
+                    }
+                    render();
+                }
+            } else {
+                const activeRect = state.rects.find(r => r.id === state.selectedRectId);
+                if (!activeRect) return;
+
+                if (state.isDraggingB) {
+                    const c = getRectCenter(activeRect);
+                    // Смещение центра в мировых координатах
+                    const newCenterX = imgX - state.dragStart.x;
+                    const newCenterY = imgY - state.dragStart.y;
+                    // Пересчитываем targetX/Y
+                    const drawW = activeRect.targetW * activeRect.scale;
+                    const drawH = activeRect.targetH * activeRect.scale;
+                    activeRect.targetX = newCenterX - drawW / 2;
+                    activeRect.targetY = newCenterY - drawH / 2;
+                    updateInputsFromRect();
+                    render();
+                } else if (state.isResizingB) {
+                    // 1. Переводим мышь в ЛОКАЛЬНЫЕ координаты объекта
+                    const local = worldToLocal(imgX, imgY, activeRect);
+                    
+                    // 2. Якорь — противоположный угол в ЛОКАЛЬНОЙ системе
+                    const w2 = (activeRect.targetW * activeRect.scale) / 2;
+                    const h2 = (activeRect.targetH * activeRect.scale) / 2;
+                    
+                    let anchorLocalX, anchorLocalY;
+                    if (state.activeCorner === 'target_tl') {
+                        anchorLocalX = w2;   // Правый край
+                        anchorLocalY = h2;   // Нижний край
+                    } else {
+                        anchorLocalX = -w2;  // Левый край
+                        anchorLocalY = -h2;  // Верхний край
+                    }
+                    
+                    // 3. Вычисляем новые размеры в локальных координатах
+                    const newLocalW = Math.abs(local.x - anchorLocalX);
+                    const newLocalH = Math.abs(local.y - anchorLocalY);
+                    
+                    if (newLocalW > 5 && newLocalH > 5) {
+                        // Новые размеры targetW/H с учетом scale
+                        const newTargetW = newLocalW / activeRect.scale;
+                        const newTargetH = newLocalH / activeRect.scale;
+                        
+                        // 4. Вычисляем новый локальный центр
+                        // Он находится на полпути между якорем и мышью
+                        const newCenterLocalX = (local.x + anchorLocalX) / 2;
+                        const newCenterLocalY = (local.y + anchorLocalY) / 2;
+                        
+                        // 5. Переводим новый локальный центр в мировые координаты
+                        // Но нам нужно учитывать поворот относительно текущего центра!
+                        const oldCenter = getRectCenter(activeRect);
+                        const rad = activeRect.rot * Math.PI / 180;
+                        
+                        const worldOffsetX = newCenterLocalX * Math.cos(rad) - newCenterLocalY * Math.sin(rad);
+                        const worldOffsetY = newCenterLocalX * Math.sin(rad) + newCenterLocalY * Math.cos(rad);
+                        
+                        const newCenterWorldX = oldCenter.x + worldOffsetX;
+                        const newCenterWorldY = oldCenter.y + worldOffsetY;
+                        
+                        // 6. Обновляем targetX/Y/W/H
+                        const newDrawW = newTargetW * activeRect.scale;
+                        const newDrawH = newTargetH * activeRect.scale;
+                        
+                        activeRect.targetW = newTargetW;
+                        activeRect.targetH = newTargetH;
+                        activeRect.targetX = newCenterWorldX - newDrawW / 2;
+                        activeRect.targetY = newCenterWorldY - newDrawH / 2;
+                    }
+                    updateInputsFromRect();
+                    render();
+                }
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (state.isDrawing && tempRect) {
+                tempRect.targetW = tempRect.w / (tempRect.scale || 1);
+                tempRect.targetH = tempRect.h / (tempRect.scale || 1);
+                
+                const drawW = tempRect.targetW * tempRect.scale;
+                const drawH = tempRect.targetH * tempRect.scale;
+                tempRect.targetX = (tempRect.x + tempRect.w/2) - drawW/2;
+                tempRect.targetY = (tempRect.y + tempRect.h/2) - drawH/2;
+                
+                state.isDrawing = false;
+                tempRect = null;
+                canvas.style.cursor = 'crosshair';
+                updateInputsFromRect();
+                render();
+            }
+            state.isDraggingA = false;
+            state.isResizingA = false;
+            state.isDraggingB = false;
+            state.isResizingB = false;
+            state.isPanning = false;
+            state.activeCorner = null;
+            canvas.style.cursor = 'crosshair';
+        });
+    }
+
+    function saveToJson() {
+        const dataStr = JSON.stringify(state.rects, null, 2);
+        const blob = new Blob([dataStr], {type: "application/json"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = "texture_transfer_config.json";
+        a.click();
+    }
+
+    function loadFromJson(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const json = JSON.parse(event.target.result);
+                if (Array.isArray(json)) {
+                    state.rects = json;
+                    state.rects.forEach((r, i) => { if (!r.id) r.id = Date.now() + i; });
+                    renderList();
+                    render();
+                }
+            } catch (err) { alert("Ошибка чтения JSON"); }
+        };
+        reader.readAsText(file);
+    }
+
+    function exportLayer() {
+        if (!state.imgA || !state.imgB) { alert("Загрузите обе текстуры!"); return; }
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = state.imgB.width;
+        tempCanvas.height = state.imgB.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+        state.rects.forEach(r => {
+            const drawW = r.targetW * r.scale;
+            const drawH = r.targetH * r.scale;
+            
+            tempCtx.save();
+            tempCtx.translate(r.targetX + drawW/2, r.targetY + drawH/2);
+            tempCtx.rotate(r.rot * Math.PI / 180);
+            
+            tempCtx.drawImage(
+                state.imgA, 
+                r.x, r.y, r.w, r.h, 
+                -drawW/2, -drawH/2, drawW, drawH
+            );
+            tempCtx.restore();
+        });
+
+        const link = document.createElement('a');
+        link.download = 'transferred_layer.png';
+        link.href = tempCanvas.toDataURL('image/png');
+        link.click();
+    }
+
+    init();
+</script>
+</body>
+</html>
